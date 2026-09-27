@@ -23,6 +23,12 @@ on:
       - '.github/workflows/nightly-windows.yml'
       - '.github/workflows/ci-windows.yml'
   workflow_dispatch:
+    inputs:
+      enable_pyrowave:
+        description: 'Build with the experimental PyroWave codec'
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
@@ -40,3 +46,5 @@ jobs:
       # real release (MSI stamps 0.0.<run>.0) while staying unique per run.
       release_version: 0.0.${{ github.run_number }}-nightly
       nightly: true
+      # Empty (false) on push/pull_request events.
+      enable_pyrowave: ${{ inputs.enable_pyrowave == true }}

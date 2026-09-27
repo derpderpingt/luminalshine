@@ -19,6 +19,13 @@ on:
         required: false
         type: boolean
         default: false
+      enable_pyrowave:
+        # Build libpyrowave-shared from a pinned upstream commit and
+        # configure with -DSUNSHINE_ENABLE_PYROWAVE=ON (experimental codec,
+        # see docs/building.md). Off for releases and push-to-main nightlies.
+        required: false
+        type: boolean
+        default: false
     # Secrets are forwarded from ci.yml via `secrets: inherit`. They are
     # declared optional here so the build still runs while SIGN_ARTIFACTS
     # is disabled (no values present) and only enforced inside the signing
@@ -216,6 +223,8 @@ jobs:
             "mingw-w64-${TOOLCHAIN}-openssl"
             "mingw-w64-${TOOLCHAIN}-opus"
             "mingw-w64-${TOOLCHAIN}-toolchain"
+            # Header-only; needed by pyrowave.h when enable_pyrowave is set.
+            "mingw-w64-${TOOLCHAIN}-vulkan-headers"
           )
 
           if [[ "${MATRIX_MSYSTEM}" == "ucrt64" ]]; then
@@ -386,6 +395,30 @@ jobs:
         # `core`".
         run: rustup target add x86_64-pc-windows-gnullvm
 
+      - name: Build PyroWave
+        if: inputs.enable_pyrowave == true
+        shell: msys2 {0}
+        env:
+          # Themaister/pyrowave, API 0.6. Bump together with the headers the
+          # encode path in src/video.cpp was written against.
+          PYROWAVE_COMMIT: 89f7e47d4abbf650c91fae766728af866c5e32a0
+        run: |
+          set -e
+          git clone https://github.com/Themaister/pyrowave .pyrowave/src
+          cd .pyrowave/src
+          git checkout "${PYROWAVE_COMMIT}"
+          bash checkout_granite.sh
+          # GCC so upstream links its C++ runtime statically into the DLL
+          # (its CMake only does that for GNU compilers on Windows).
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DCMAKE_INSTALL_PREFIX="$(cygpath -m "$(pwd)/../install")"
+          cmake --build build --target pyrowave-shared
+          cmake --install build
+          ls -R ../install
+
       - name: Build Windows
         shell: msys2 {0}
         env:
@@ -417,6 +450,8 @@ jobs:
             -DCMAKE_CXX_COMPILER=clang++ \
             -DSUNSHINE_ASSETS_DIR=assets \
             -DSUNSHINE_ENABLE_WEBRTC=ON \
+            -DSUNSHINE_ENABLE_PYROWAVE=${{ inputs.enable_pyrowave && 'ON' || 'OFF' }} \
+            -DPYROWAVE_ROOT="$(cygpath -m "$(pwd)/.pyrowave/install")" \
             -DSUNSHINE_PUBLISHER_NAME="NortheBridge Foundation" \
             -DSUNSHINE_PUBLISHER_WEBSITE="https://northebridge.com/" \
             -DSUNSHINE_PUBLISHER_ISSUE_URL="https://github.com/NortheBridge/luminalshine"
@@ -856,5 +891,16 @@ jobs:
         with:
           name: luminalshine-nightly-portable
           path: artifacts/LuminalShine_x64-portable.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload nightly installer EXE
+        # Unsigned bootstrapper (wraps the MSI) for manual testing of
+        # nightly or feature-branch builds. Windows SmartScreen will warn.
+        if: inputs.nightly == true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: luminalshine-nightly-installer
+          path: artifacts/LuminalShine_x64-installer.exe
           if-no-files-found: error
           retention-days: 14
