@@ -415,7 +415,8 @@ jobs:
             -DCMAKE_C_COMPILER=gcc \
             -DCMAKE_CXX_COMPILER=g++ \
             -DCMAKE_INSTALL_PREFIX="$(cygpath -m "$(pwd)/../install")"
-          cmake --build build --target pyrowave-shared
+          # Full build: the install rules also copy pyrowave-device-validation.exe.
+          cmake --build build
           cmake --install build
           ls -R ../install
 
