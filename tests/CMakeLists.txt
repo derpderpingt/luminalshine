@@ -276,4 +276,15 @@ if (WIN32)
             VERBATIM
         )
     endif()
+
+    # Same story for the optional PyroWave runtime (SUNSHINE_ENABLE_PYROWAVE=ON).
+    if(PYROWAVE_RUNTIME_DLL)
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${PYROWAVE_RUNTIME_DLL}"
+                "${CMAKE_CURRENT_BINARY_DIR}"
+            COMMENT "Copying PyroWave DLL to test binary directory"
+            VERBATIM
+        )
+    endif()
 endif ()

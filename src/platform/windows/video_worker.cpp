@@ -597,21 +597,33 @@ namespace platf::video_worker {
       (void) send(pipe, message_e::startup_error);
       return 12;
     }
-    if (start.config.videoFormat < 0 || start.config.videoFormat > 2 ||
+    if (start.config.videoFormat < 0 || start.config.videoFormat > video::pyrowave_video_format ||
         start.config.dynamicRange < 0 || start.config.dynamicRange > 1 ||
         start.config.chromaSamplingType < 0 || start.config.chromaSamplingType > 1) {
       (void) send(pipe, message_e::startup_error);
       return 16;
     }
-    const auto codec = static_cast<std::size_t>(start.config.videoFormat);
-    const auto dynamic_range_mask = std::uint32_t {1} << video::encoder_t::DYNAMIC_RANGE;
-    const auto yuv444_mask = std::uint32_t {1} << video::encoder_t::YUV444;
-    if (!start.encoder.supported_codec[codec] ||
-        (start.config.dynamicRange && !(start.encoder.codec_capabilities[codec] & dynamic_range_mask)) ||
-        (start.config.chromaSamplingType && !(start.encoder.codec_capabilities[codec] & yuv444_mask))) {
-      BOOST_LOG(error) << "Video worker: requested stream format is inconsistent with the validated encoder snapshot.";
-      (void) send(pipe, message_e::startup_error);
-      return 17;
+    if (start.config.videoFormat == video::pyrowave_video_format) {
+      // PyroWave bypasses the probed hardware encoder entirely (system-memory
+      // capture + its own Vulkan device), so the encoder snapshot says nothing
+      // about it. The parent's RTSP handler already required 8-bit 4:2:0 and a
+      // build with PyroWave; enforce both again at this process boundary.
+      if (!video::pyrowave_available() || start.config.dynamicRange != 0 || start.config.chromaSamplingType != 0) {
+        BOOST_LOG(error) << "Video worker: PyroWave stream requested but not serviceable in this worker.";
+        (void) send(pipe, message_e::startup_error);
+        return 17;
+      }
+    } else {
+      const auto codec = static_cast<std::size_t>(start.config.videoFormat);
+      const auto dynamic_range_mask = std::uint32_t {1} << video::encoder_t::DYNAMIC_RANGE;
+      const auto yuv444_mask = std::uint32_t {1} << video::encoder_t::YUV444;
+      if (!start.encoder.supported_codec[codec] ||
+          (start.config.dynamicRange && !(start.encoder.codec_capabilities[codec] & dynamic_range_mask)) ||
+          (start.config.chromaSamplingType && !(start.encoder.codec_capabilities[codec] & yuv444_mask))) {
+        BOOST_LOG(error) << "Video worker: requested stream format is inconsistent with the validated encoder snapshot.";
+        (void) send(pipe, message_e::startup_error);
+        return 17;
+      }
     }
     if (!send(pipe, message_e::encoder_ready)) {
       return 14;
@@ -843,6 +855,11 @@ namespace platf::video_worker {
       // The single bounded retry is therefore the connection-safe backend.
       start.safe_capture = 1;
       BOOST_LOG(warning) << "Video worker: bounded retry is forcing isolated WGC safe-capture.";
+    } else if (direct_vgd && config.videoFormat == video::pyrowave_video_format) {
+      // The LuminalVGD ring delivers GPU textures; PyroWave captures in system
+      // memory, which only the WGC/DDA RAM backends provide.
+      start.safe_capture = 1;
+      BOOST_LOG(info) << "Video worker: PyroWave session on LuminalVGD uses isolated WGC capture instead of the direct ring.";
     } else if (direct_vgd) {
       const auto display_name = display_device::map_output_name(::config::get_active_output_name());
       const auto target = VDISPLAY::vgd::ring_target_for_worker_display(display_name);

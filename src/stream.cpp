@@ -3346,6 +3346,9 @@ namespace stream {
         md.protocol    = "RTSP";
         const int video_format = config.monitor.videoFormat;
         md.codec       = (video_format == 0) ? "H264" : (video_format == 1) ? "HEVC" : (video_format == 2) ? "AV1" : "?";
+        if (video_format == video::pyrowave_video_format) {
+          md.codec = "PyroWave";
+        }
         md.width                = config.monitor.width;
         md.height               = config.monitor.height;
         md.fps                  = config.monitor.framerate;

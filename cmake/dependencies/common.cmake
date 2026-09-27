@@ -41,3 +41,6 @@ elseif(UNIX)
         include("${CMAKE_MODULE_PATH}/dependencies/linux.cmake")
     endif()
 endif()
+
+# optional: experimental PyroWave codec
+include("${CMAKE_MODULE_PATH}/dependencies/pyrowave.cmake")
