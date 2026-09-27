@@ -7,13 +7,18 @@
 #include <atomic>
 #include <bitset>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <list>
 #include <mutex>
 #include <optional>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
+#include <vector>
 
 // lib includes
 #include <boost/algorithm/string/predicate.hpp>
@@ -64,6 +69,11 @@ extern "C" {
 extern "C" {
   #include <libavutil/hwcontext_d3d11va.h>
 }
+
+#if defined(SUNSHINE_ENABLE_PYROWAVE)
+  #include <vulkan/vulkan.h>
+  #include <pyrowave.h>
+#endif
 
 #endif
 
@@ -728,6 +738,338 @@ namespace video {
     std::unique_ptr<platf::nvenc_encode_device_t> device;
     bool force_idr = false;
   };
+
+#if defined(SUNSHINE_ENABLE_PYROWAVE)
+  class pyrowave_encode_device_t: public platf::encode_device_t {
+  public:
+    struct imported_image_t {
+      pyrowave_image image {};
+      pyrowave_sync_object sync {};
+      pyrowave_image_view view {};
+      std::uint32_t image_id {};
+      std::uint64_t resource_generation {};
+    };
+
+    pyrowave_encode_device_t(platf::dxgi::display_vram_t &display, const config_t &config):
+        maximum_bitstream_size {max_bitstream_size(config)} {
+      DXGI_ADAPTER_DESC adapter_desc {};
+      const HRESULT adapter_status = display.adapter->GetDesc(&adapter_desc);
+      if (FAILED(adapter_status)) {
+        BOOST_LOG(error) << "PyroWave: failed to query the capture adapter [0x"sv << util::hex(adapter_status).to_string_view() << ']';
+        return;
+      }
+
+      pyrowave_luid device_luid {};
+      static_assert(sizeof(device_luid.luid) == sizeof(adapter_desc.AdapterLuid));
+      std::memcpy(device_luid.luid, &adapter_desc.AdapterLuid, sizeof(device_luid.luid));
+
+      auto result = pyrowave_create_device_by_compat(0, 0, nullptr, nullptr, &device_luid, &device);
+      if (result != PYROWAVE_SUCCESS) {
+        log_error("creating a Vulkan device", result);
+        return;
+      }
+      if (!pyrowave_device_confirm_interop_support(device)) {
+        BOOST_LOG(error) << "PyroWave: the capture adapter does not support D3D11/Vulkan interop";
+        return;
+      }
+
+      pyrowave_encoder_create_info encoder_info {};
+      encoder_info.device = device;
+      encoder_info.width = config.width;
+      encoder_info.height = config.height;
+      encoder_info.chroma = config.chromaSamplingType == 1 ?
+                              PYROWAVE_CHROMA_SUBSAMPLING_444 :
+                              PYROWAVE_CHROMA_SUBSAMPLING_420;
+      result = pyrowave_encoder_create(&encoder_info, &encoder);
+      if (result != PYROWAVE_SUCCESS) {
+        log_error("creating the encoder", result);
+        return;
+      }
+
+      valid = true;
+    }
+
+    ~pyrowave_encode_device_t() override {
+      if (encoder) {
+        pyrowave_encoder_destroy(encoder);
+      }
+      for (auto &[_, imported] : images) {
+        if (imported.image) {
+          pyrowave_image_destroy(imported.image);
+        }
+        if (imported.sync) {
+          pyrowave_sync_object_destroy(imported.sync);
+        }
+      }
+      if (device) {
+        pyrowave_device_destroy(device);
+      }
+    }
+
+    int convert(platf::img_t &img_base) override {
+      auto *img = dynamic_cast<platf::dxgi::img_d3d_t *>(&img_base);
+      if (!img || !img->capture_texture || !img->encoder_texture_handle ||
+          img->format != DXGI_FORMAT_B8G8R8A8_UNORM || !img->pyrowave_fence_handle) {
+        BOOST_LOG(error) << "PyroWave: capture did not provide a shared BGRA8 image and fence";
+        return -1;
+      }
+
+      auto image = images.find(img);
+      if (image != images.end() &&
+          (image->second.image_id != img->id ||
+           image->second.resource_generation != img->pyrowave_resource_generation.load(std::memory_order_acquire))) {
+        destroy_image(image->second);
+        images.erase(image);
+        image = images.end();
+      }
+      if (image == images.end()) {
+        imported_image_t imported {};
+        if (import_image(*img, imported)) {
+          return -1;
+        }
+        image = images.emplace(img, imported).first;
+      }
+
+      current_img = img;
+      return 0;
+    }
+
+    int encode_frame(std::vector<std::uint8_t> &framed_bitstream) {
+      if (!valid || !current_img) {
+        BOOST_LOG(error) << "PyroWave: encoder has no current capture image";
+        return -1;
+      }
+
+      auto image = images.find(current_img);
+      if (image == images.end()) {
+        BOOST_LOG(error) << "PyroWave: current capture image was not imported";
+        return -1;
+      }
+
+      const auto acquire_value = current_img->pyrowave_fence_value.load(std::memory_order_acquire);
+      if (acquire_value == std::numeric_limits<std::uint64_t>::max()) {
+        BOOST_LOG(error) << "PyroWave: D3D11 fence timeline exhausted";
+        return -1;
+      }
+      const auto release_value = acquire_value + 1;
+
+      pyrowave_gpu_external_reference external_ref {
+        image->second.image,
+        VK_QUEUE_FAMILY_EXTERNAL
+      };
+      pyrowave_gpu_sync_operation acquire {};
+      acquire.images = &external_ref;
+      acquire.num_images = 1;
+      acquire.sync.semaphore = pyrowave_sync_object_get_semaphore(image->second.sync);
+      acquire.sync.value = acquire_value;
+
+      pyrowave_gpu_sync_operation release {};
+      release.sync.semaphore = acquire.sync.semaphore;
+      release.sync.value = release_value;
+
+      pyrowave_scaled_encode_info scaling_info {};
+      scaling_info.view = image->second.view;
+      scaling_info.input_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+      scaling_info.output_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+      scaling_info.intermediate_plane_format = VK_FORMAT_R8_UNORM;
+      scaling_info.ycbcr_chroma_midpoint = 128.0f / 255.0f;
+
+      pyrowave_rate_control rate_control {maximum_bitstream_size};
+      auto result = pyrowave_encoder_encode_gpu_scaled_synchronous(
+        encoder, &acquire, &release, &scaling_info, &rate_control
+      );
+      if (result != PYROWAVE_SUCCESS) {
+        log_error("encoding a frame", result);
+        return -1;
+      }
+
+      constexpr std::size_t packet_boundary = 1200;
+      std::size_t packet_count = 0;
+      result = pyrowave_encoder_compute_num_packets(encoder, packet_boundary, &packet_count);
+      if (result != PYROWAVE_SUCCESS || packet_count == 0 || packet_count > std::numeric_limits<std::uint16_t>::max()) {
+        log_error("computing the packet count", result);
+        return -1;
+      }
+
+      std::vector<pyrowave_packet> packets(packet_count);
+      std::vector<std::uint8_t> bitstream(maximum_bitstream_size);
+      std::size_t output_packet_count = 0;
+      result = pyrowave_encoder_packetize(
+        encoder, packets.data(), packet_boundary, &output_packet_count, bitstream.data(), bitstream.size()
+      );
+      if (result != PYROWAVE_SUCCESS || output_packet_count != packet_count) {
+        log_error("packetizing a frame", result);
+        return -1;
+      }
+
+      framed_bitstream.clear();
+      framed_bitstream.insert(framed_bitstream.end(), {'P', 'Y', 'R', 'W', 1});
+      framed_bitstream.push_back(static_cast<std::uint8_t>(packet_count >> 8));
+      framed_bitstream.push_back(static_cast<std::uint8_t>(packet_count));
+      framed_bitstream.push_back(0);
+      for (const auto &packet : packets) {
+        if (packet.size > std::numeric_limits<std::uint32_t>::max() ||
+            packet.offset > bitstream.size() || packet.size > bitstream.size() - packet.offset) {
+          BOOST_LOG(error) << "PyroWave: packetizer returned an invalid packet range";
+          return -1;
+        }
+        const auto packet_size = static_cast<std::uint32_t>(packet.size);
+        framed_bitstream.push_back(static_cast<std::uint8_t>(packet_size >> 24));
+        framed_bitstream.push_back(static_cast<std::uint8_t>(packet_size >> 16));
+        framed_bitstream.push_back(static_cast<std::uint8_t>(packet_size >> 8));
+        framed_bitstream.push_back(static_cast<std::uint8_t>(packet_size));
+        framed_bitstream.insert(
+          framed_bitstream.end(),
+          bitstream.begin() + static_cast<std::ptrdiff_t>(packet.offset),
+          bitstream.begin() + static_cast<std::ptrdiff_t>(packet.offset + packet.size)
+        );
+      }
+
+      result = pyrowave_sync_object_cpu_wait(image->second.sync, release_value, std::numeric_limits<std::uint64_t>::max());
+      if (result != PYROWAVE_SUCCESS) {
+        log_error("waiting for the D3D11 release fence", result);
+        return -1;
+      }
+      current_img->pyrowave_fence_value.store(release_value, std::memory_order_release);
+      return 0;
+    }
+
+    bool is_valid() const {
+      return valid;
+    }
+
+  private:
+    static std::size_t max_bitstream_size(const config_t &config) {
+      constexpr std::int64_t minimum_size = 64 * 1024;
+      constexpr std::int64_t maximum_size = 64 * 1024 * 1024;
+      const auto framerate = std::max(config.framerate, 1);
+      const auto frame_budget = static_cast<std::int64_t>(config.bitrate) * 1000 / 8 / framerate;
+      return static_cast<std::size_t>(std::clamp(frame_budget, minimum_size, maximum_size));
+    }
+
+    static void log_error(const char *operation, pyrowave_result result) {
+      BOOST_LOG(error) << "PyroWave: error " << static_cast<int>(result) << " while " << operation;
+    }
+
+    void destroy_image(imported_image_t &imported) {
+      if (imported.image) {
+        pyrowave_image_destroy(imported.image);
+      }
+      if (imported.sync) {
+        pyrowave_sync_object_destroy(imported.sync);
+      }
+    }
+
+    static HANDLE duplicate_handle(HANDLE source) {
+      HANDLE duplicate = nullptr;
+      if (!source || !DuplicateHandle(
+            GetCurrentProcess(), source, GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS
+          )) {
+        BOOST_LOG(error) << "PyroWave: failed to duplicate a D3D11 shared handle (GetLastError=" << GetLastError() << ')';
+        return nullptr;
+      }
+      return duplicate;
+    }
+
+    int import_image(platf::dxgi::img_d3d_t &img, imported_image_t &imported) {
+      HANDLE texture_handle = duplicate_handle(img.encoder_texture_handle);
+      if (!texture_handle) {
+        return -1;
+      }
+
+      VkExternalMemoryImageCreateInfo external_info {VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
+      external_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
+
+      VkImageCreateInfo image_info {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+      image_info.pNext = &external_info;
+      image_info.imageType = VK_IMAGE_TYPE_2D;
+      image_info.extent = {static_cast<std::uint32_t>(img.width), static_cast<std::uint32_t>(img.height), 1};
+      image_info.format = VK_FORMAT_B8G8R8A8_UNORM;
+      image_info.mipLevels = 1;
+      image_info.arrayLayers = 1;
+      image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+      image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+      image_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+      image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+      pyrowave_image_create_info image_create_info {};
+      image_create_info.device = device;
+      image_create_info.external_handle = static_cast<pyrowave_os_handle>(reinterpret_cast<std::uintptr_t>(texture_handle));
+      image_create_info.handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
+      image_create_info.image_create_info = &image_info;
+      auto result = pyrowave_image_create(&image_create_info, &imported.image);
+      if (result != PYROWAVE_SUCCESS) {
+        CloseHandle(texture_handle);
+        log_error("importing a D3D11 texture", result);
+        return -1;
+      }
+
+      result = pyrowave_image_get_image_view(
+        imported.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_USAGE_SAMPLED_BIT, &imported.view
+      );
+      if (result != PYROWAVE_SUCCESS) {
+        log_error("creating a Vulkan image view", result);
+        pyrowave_image_destroy(imported.image);
+        imported.image = nullptr;
+        return -1;
+      }
+
+      HANDLE fence_handle = duplicate_handle(img.pyrowave_fence_handle);
+      if (!fence_handle) {
+        pyrowave_image_destroy(imported.image);
+        imported.image = nullptr;
+        return -1;
+      }
+
+      pyrowave_sync_object_create_info sync_info {};
+      sync_info.device = device;
+      sync_info.external_handle = static_cast<pyrowave_os_handle>(reinterpret_cast<std::uintptr_t>(fence_handle));
+      sync_info.handle_type = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D11_FENCE_BIT;
+      sync_info.semaphore_type = VK_SEMAPHORE_TYPE_TIMELINE;
+      result = pyrowave_sync_object_create(&sync_info, &imported.sync);
+      if (result != PYROWAVE_SUCCESS) {
+        CloseHandle(fence_handle);
+        pyrowave_image_destroy(imported.image);
+        imported.image = nullptr;
+        log_error("importing a D3D11 fence", result);
+        return -1;
+      }
+
+      imported.image_id = img.id;
+      imported.resource_generation = img.pyrowave_resource_generation.load(std::memory_order_acquire);
+      return 0;
+    }
+
+    pyrowave_device device {};
+    pyrowave_encoder encoder {};
+    std::unordered_map<platf::dxgi::img_d3d_t *, imported_image_t> images;
+    platf::dxgi::img_d3d_t *current_img = nullptr;
+    const std::size_t maximum_bitstream_size;
+    bool valid = false;
+  };
+
+  class pyrowave_encode_session_t: public encode_session_t {
+  public:
+    explicit pyrowave_encode_session_t(std::unique_ptr<pyrowave_encode_device_t> device):
+        device {std::move(device)} {
+    }
+
+    int convert(platf::img_t &img) override {
+      return device->convert(img);
+    }
+
+    void request_idr_frame() override {
+    }
+
+    void request_normal_frame() override {
+    }
+
+    void invalidate_ref_frames(int64_t, int64_t) override {
+    }
+
+    std::unique_ptr<pyrowave_encode_device_t> device;
+  };
+#endif
 
   struct sync_session_ctx_t {
     safe::signal_t *join_event;
@@ -2131,7 +2473,31 @@ namespace video {
     return 0;
   }
 
+#if defined(SUNSHINE_ENABLE_PYROWAVE)
+  int encode_pyrowave(int64_t frame_nr, pyrowave_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp, std::optional<std::chrono::steady_clock::time_point> host_processing_timestamp, bool capture_placeholder, std::uint64_t capture_generation) {
+    std::vector<std::uint8_t> framed_bitstream;
+    if (session.device->encode_frame(framed_bitstream)) {
+      return -1;
+    }
+
+    auto packet = std::make_unique<packet_raw_generic>(std::move(framed_bitstream), frame_nr, true);
+    packet->channel_data = channel_data;
+    packet->after_ref_frame_invalidation = false;
+    packet->capture_placeholder = capture_placeholder;
+    packet->capture_generation = capture_generation;
+    packet->frame_timestamp = frame_timestamp;
+    packet->host_processing_timestamp = host_processing_timestamp;
+    packets->raise(std::move(packet));
+    return 0;
+  }
+#endif
+
   int encode(int64_t frame_nr, encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp, std::optional<std::chrono::steady_clock::time_point> host_processing_timestamp, bool capture_placeholder = false, std::uint64_t capture_generation = 0) {
+#if defined(SUNSHINE_ENABLE_PYROWAVE)
+    if (auto pyrowave_session = dynamic_cast<pyrowave_encode_session_t *>(&session)) {
+      return encode_pyrowave(frame_nr, *pyrowave_session, packets, channel_data, frame_timestamp, host_processing_timestamp, capture_placeholder, capture_generation);
+    }
+#endif
     if (auto avcodec_session = dynamic_cast<avcodec_encode_session_t *>(&session)) {
       return encode_avcodec(frame_nr, *avcodec_session, packets, channel_data, frame_timestamp, host_processing_timestamp, capture_placeholder, capture_generation);
     } else if (auto nvenc_session = dynamic_cast<nvenc_encode_session_t *>(&session)) {
@@ -2661,6 +3027,15 @@ namespace video {
   }
 
   std::unique_ptr<encode_session_t> make_encode_session(platf::display_t *disp, const encoder_t &encoder, const config_t &config, int width, int height, std::unique_ptr<platf::encode_device_t> encode_device) {
+#if defined(SUNSHINE_ENABLE_PYROWAVE)
+    if (dynamic_cast<pyrowave_encode_device_t *>(encode_device.get())) {
+      auto pyrowave_device = boost::dynamic_pointer_cast<pyrowave_encode_device_t>(std::move(encode_device));
+      if (!pyrowave_device->is_valid()) {
+        return nullptr;
+      }
+      return std::make_unique<pyrowave_encode_session_t>(std::move(pyrowave_device));
+    }
+#endif
     if (dynamic_cast<platf::avcodec_encode_device_t *>(encode_device.get())) {
       auto avcodec_encode_device = boost::dynamic_pointer_cast<platf::avcodec_encode_device_t>(std::move(encode_device));
       return make_avcodec_encode_session(disp, encoder, config, width, height, std::move(avcodec_encode_device));
@@ -3098,6 +3473,26 @@ namespace video {
     std::unique_ptr<platf::encode_device_t> result;
 
     auto colorspace = colorspace_from_client_config(config, disp.is_hdr());
+
+#if defined(SUNSHINE_ENABLE_PYROWAVE)
+    if (config.videoFormat == VIDEO_FORMAT_PYROWAVE) {
+      if (config.dynamicRange != 0) {
+        BOOST_LOG(error) << "PyroWave currently supports SDR streams only";
+        return {};
+      }
+      auto *vram_display = dynamic_cast<platf::dxgi::display_vram_t *>(&disp);
+      if (!vram_display) {
+        BOOST_LOG(error) << "PyroWave requires a Windows D3D11 VRAM capture display";
+        return {};
+      }
+      auto pyrowave_device = std::make_unique<pyrowave_encode_device_t>(*vram_display, config);
+      if (!pyrowave_device->is_valid()) {
+        return {};
+      }
+      pyrowave_device->colorspace = colorspace;
+      return pyrowave_device;
+    }
+#endif
 
     platf::pix_fmt_e pix_fmt;
     if (config.chromaSamplingType == 1) {
@@ -3726,9 +4121,14 @@ namespace video {
     config_t config,
     void *channel_data
   ) {
+    if (config.videoFormat == VIDEO_FORMAT_PYROWAVE && channel_data == nullptr) {
+      BOOST_LOG(error) << "PyroWave is only supported by the RTSP streaming path";
+      return;
+    }
 #ifdef _WIN32
     const bool isolated_worker_child = platf::video_worker::is_child_process();
-    if (platf::video_worker::capture(mail, config, channel_data)) {
+    if (config.videoFormat != VIDEO_FORMAT_PYROWAVE &&
+        platf::video_worker::capture(mail, config, channel_data)) {
       return;
     }
     // A rare worker-launch/bootstrap failure may still use the legacy

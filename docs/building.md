@@ -208,6 +208,13 @@ which is **shared across every sunshine build dir, worktree, and git checkout on
 first build. To relocate the cache, set `LUMINALSHINE_DEPS_DIR=<path>` in your environment before invoking either the
 script or CMake.
 
+##### PyroWave (Windows, experimental)
+PyroWave support is opt-in and disabled by default. Configure with
+`-DSUNSHINE_ENABLE_PYROWAVE=ON` to fetch the pinned PyroWave 0.6 and Granite sources and build the D3D11/Vulkan
+backend. This option requires network access during CMake configuration and is currently limited to SDR streams from
+the Windows D3D11 capture path. The runtime `pyrowave` setting is also disabled by default and should only be enabled
+for clients that implement the PyroWave protocol.
+
 For finer control the script accepts overrides via `-BuildDir`/`-OutDir` parameters or the legacy
 `WEBRTC_BUILD_DIR` / `WEBRTC_OUT_DIR` env vars (these still take precedence if set).
 

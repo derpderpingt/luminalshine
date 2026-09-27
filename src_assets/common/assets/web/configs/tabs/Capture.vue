@@ -389,6 +389,11 @@ const shouldShowSoftware = computed(() => showAll() || props.currentTab === 'sw'
           </p>
         </template>
       </ConfigFieldRenderer>
+      <ConfigFieldRenderer
+        v-if="metadata?.pyrowave_available"
+        setting-key="pyrowave"
+        v-model="config.pyrowave"
+      />
       <ConfigFieldRenderer setting-key="session_monitor" v-model="config.session_monitor" />
       <fieldset
         v-if="platform === 'windows'"

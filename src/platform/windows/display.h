@@ -333,6 +333,9 @@ namespace platf::dxgi {
     int init(const ::video::config_t &config, const std::string &display_name, bool skip_dd_test = false);
 
     capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override;
+    virtual int capture_complete(img_t *) {
+      return 0;
+    }
 
     /**
      * @brief True while this capture source is inside a BOUNDED, known-transient
@@ -370,6 +373,7 @@ namespace platf::dxgi {
 
     DXGI_FORMAT capture_format;
     D3D_FEATURE_LEVEL feature_level;
+    bool pyrowave_enabled = false;
 
     std::unique_ptr<high_precision_timer> timer = create_high_precision_timer();
 
@@ -472,6 +476,11 @@ namespace platf::dxgi {
     std::unique_ptr<nvenc_encode_device_t> make_nvenc_encode_device(pix_fmt_e pix_fmt) override;
 
     std::atomic<uint32_t> next_image_id;
+
+#if defined(SUNSHINE_ENABLE_PYROWAVE)
+    int initialize_pyrowave_sync(img_d3d_t *img);
+    int capture_complete(img_t *img_base) override;
+#endif
   };
 
   /**

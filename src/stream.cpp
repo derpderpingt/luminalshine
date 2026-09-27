@@ -3345,7 +3345,10 @@ namespace stream {
         md.client_uuid = launch_session.client_uuid;
         md.protocol    = "RTSP";
         const int video_format = config.monitor.videoFormat;
-        md.codec       = (video_format == 0) ? "H264" : (video_format == 1) ? "HEVC" : (video_format == 2) ? "AV1" : "?";
+        md.codec       = (video_format == 0) ? "H264" :
+                         (video_format == 1) ? "HEVC" :
+                         (video_format == 2) ? "AV1" :
+                         (video_format == video::VIDEO_FORMAT_PYROWAVE) ? "PyroWave" : "?";
         md.width                = config.monitor.width;
         md.height               = config.monitor.height;
         md.fps                  = config.monitor.framerate;

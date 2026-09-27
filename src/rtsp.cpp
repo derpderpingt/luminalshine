@@ -1025,6 +1025,12 @@ namespace rtsp_stream {
       ss << "a=rtpmap:98 AV1/90000"sv << std::endl;
     }
 
+#if defined(SUNSHINE_ENABLE_PYROWAVE)
+    if (config::video.pyrowave) {
+      ss << "a=rtpmap:99 PYROWAVE/90000"sv << std::endl;
+    }
+#endif
+
     if (!session.surround_params.empty()) {
       // If we have our own surround parameters, advertise them twice first
       ss << "a=fmtp:97 surround-params="sv << session.surround_params << std::endl;
@@ -1229,12 +1235,43 @@ namespace rtsp_stream {
       config.monitor.chromaSamplingType = (int) util::from_view(args.at("x-ss-video[0].chromaSamplingType"sv));
       config.monitor.enableIntraRefresh = (int) util::from_view(args.at("x-ss-video[0].intraRefresh"sv));
 
+      if (config.monitor.videoFormat < 0 || config.monitor.videoFormat > video::VIDEO_FORMAT_PYROWAVE) {
+        BOOST_LOG(warning) << "Rejecting unsupported video format "sv << config.monitor.videoFormat;
+        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return;
+      }
+      if (config.monitor.videoFormat == video::VIDEO_FORMAT_PYROWAVE) {
+#if defined(SUNSHINE_ENABLE_PYROWAVE)
+        if (!config::video.pyrowave) {
+          BOOST_LOG(warning) << "Client requested PyroWave while pyrowave is disabled";
+          respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+          return;
+        }
+        if (config.monitor.dynamicRange != 0) {
+          BOOST_LOG(warning) << "Rejecting PyroWave HDR request; the current backend supports SDR only";
+          respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+          return;
+        }
+#else
+        BOOST_LOG(warning) << "Client requested PyroWave but this build has no PyroWave backend";
+        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return;
+#endif
+      }
+
       // Clients normally only request 4:4:4 when we advertised it, but the
       // toggle may have been flipped since the serverinfo query — enforce it
       // here so a disabled host never starts a 4:4:4 session.
       if (config.monitor.chromaSamplingType == 1 && !config::video.yuv444_streaming) {
         BOOST_LOG(warning) << "Client requested YUV 4:4:4 but yuv444_streaming is disabled; downgrading to YUV 4:2:0"sv;
         config.monitor.chromaSamplingType = 0;
+      }
+      if (config.monitor.videoFormat == video::VIDEO_FORMAT_PYROWAVE &&
+          config.monitor.chromaSamplingType != 1 &&
+          ((config.monitor.width & 1) != 0 || (config.monitor.height & 1) != 0)) {
+        BOOST_LOG(warning) << "Rejecting odd-sized PyroWave 4:2:0 request";
+        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return;
       }
 
       // Validate that clientRefreshRateX100 is consistent with maxFPS.

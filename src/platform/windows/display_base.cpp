@@ -1443,6 +1443,9 @@ namespace platf::dxgi {
           }
           break;
         case platf::capture_e::ok:
+          if (img_out && capture_complete(img_out.get())) {
+            return capture_e::error;
+          }
           if (!push_captured_image_cb(std::move(img_out), true)) {
             return capture_e::ok;
           }
@@ -1557,6 +1560,8 @@ namespace platf::dxgi {
   }
 
   int display_base_t::init(const ::video::config_t &config, const std::string &display_name, bool skip_dd_test) {
+    pyrowave_enabled = config.videoFormat == video::VIDEO_FORMAT_PYROWAVE;
+
     static std::once_flag windows_cpp_once_flag;
 
     std::call_once(windows_cpp_once_flag, []() {

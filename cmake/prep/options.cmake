@@ -28,6 +28,11 @@ endif()
 option(SUNSHINE_ENABLE_WEBRTC "Enable WebRTC streaming support (Windows only)." ${_luminalshine_webrtc_default})
 unset(_luminalshine_webrtc_default)
 
+option(SUNSHINE_ENABLE_PYROWAVE "Enable experimental PyroWave streaming support (Windows only)." OFF)
+if(SUNSHINE_ENABLE_PYROWAVE AND NOT WIN32)
+    message(FATAL_ERROR "PyroWave streaming currently requires the Windows D3D11 capture backend.")
+endif()
+
 option(SUNSHINE_SYSTEM_WAYLAND_PROTOCOLS "Use system installation of wayland-protocols rather than the submodule." OFF)
 
 if(APPLE)
