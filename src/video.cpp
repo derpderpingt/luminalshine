@@ -38,11 +38,19 @@ extern "C" {
 #include "logging.h"
 #include "nvenc/nvenc_base.h"
 #include "platform/common.h"
+#include "pyrowave_framing.h"
 #include "sync.h"
 #include "tdr_state.h"
 #include "video.h"
 #include "webrtc_stream.h"
 #include "yuv444_fallback.h"
+
+#ifdef SUNSHINE_ENABLE_PYROWAVE
+  // pyrowave.h refuses to compile unless the Vulkan headers come first.
+  #include <vulkan/vulkan.h>
+  // Include order matters: keep this after vulkan.h.
+  #include <pyrowave/pyrowave.h>
+#endif
 #ifdef _WIN32
   #include "amf/amf_caps.h"
   #include "platform/windows/frame_limiter.h"
@@ -728,6 +736,77 @@ namespace video {
     std::unique_ptr<platf::nvenc_encode_device_t> device;
     bool force_idr = false;
   };
+
+#ifdef SUNSHINE_ENABLE_PYROWAVE
+  /**
+   * @brief Encode session for the experimental PyroWave codec.
+   *
+   * Capture happens in system memory; `converter` turns each BGRA frame into
+   * NV12 on the CPU and PyroWave uploads and encodes it on its own Vulkan
+   * device. Every PyroWave frame is intra-only, so IDR and reference-frame
+   * invalidation requests are no-ops.
+   */
+  class pyrowave_encode_session_t: public encode_session_t {
+  public:
+    struct device_deleter {
+      void operator()(pyrowave_device_opaque *device) const {
+        if (device) {
+          pyrowave_device_destroy(device);
+        }
+      }
+    };
+
+    struct encoder_deleter {
+      void operator()(pyrowave_encoder_opaque *encoder) const {
+        if (encoder) {
+          pyrowave_encoder_destroy(encoder);
+        }
+      }
+    };
+
+    int convert(platf::img_t &img) override {
+      if (!converter) {
+        return -1;
+      }
+      return converter->convert(img);
+    }
+
+    void request_idr_frame() override {
+    }
+
+    void request_normal_frame() override {
+    }
+
+    void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) override {
+    }
+
+    std::unique_ptr<avcodec_software_encode_device_t> converter;
+
+    // Members are destroyed in reverse order: the encoder must go before the
+    // device it was created on.
+    std::unique_ptr<pyrowave_device_opaque, device_deleter> device;
+    std::unique_ptr<pyrowave_encoder_opaque, encoder_deleter> encoder;
+
+    std::size_t max_frame_bytes = 0;
+
+    // Reused across frames to avoid a multi-megabyte allocation per frame.
+    std::vector<std::uint8_t> bitstream;
+    std::vector<pyrowave_packet> packets;
+  };
+#endif
+
+  /**
+   * @brief Capture memory type for a session.
+   *
+   * PyroWave encodes from system memory regardless of which hardware encoder
+   * was chosen for the classic codecs, so it needs a RAM capture backend.
+   */
+  platf::mem_type_e capture_dev_type_for(const encoder_t &encoder, const config_t &config) {
+    if (config.videoFormat == pyrowave_video_format) {
+      return platf::mem_type_e::system;
+    }
+    return encoder.platform_formats->dev_type;
+  }
 
   struct sync_session_ctx_t {
     safe::signal_t *join_event;
@@ -1712,14 +1791,14 @@ namespace video {
     std::shared_ptr<platf::display_t> disp;
 
     while (capture_ctx_queue->running()) {
-      refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+      refresh_displays(capture_dev_type_for(encoder, capture_ctxs.front().config), display_names, display_p);
 
       if (!ensure_virtual_display_ready(display_names, display_p)) {
         std::this_thread::sleep_for(50ms);
         continue;
       }
 
-      disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
+      disp = platf::display(capture_dev_type_for(encoder, capture_ctxs.front().config), display_names[display_p], capture_ctxs.front().config);
       if (disp) {
         break;
       }
@@ -1986,7 +2065,7 @@ namespace video {
 #endif
 
               // Refresh display names since a display removal might have caused the reinitialization
-              refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+              refresh_displays(capture_dev_type_for(encoder, capture_ctxs.front().config), display_names, display_p);
 
               if (!ensure_virtual_display_ready(display_names, display_p)) {
                 std::this_thread::sleep_for(50ms);
@@ -2003,7 +2082,7 @@ namespace video {
               }
 
               // reset_display() will sleep between retries
-              reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
+              reset_display(disp, capture_dev_type_for(encoder, capture_ctxs.front().config), display_names[display_p], capture_ctxs.front().config);
               if (disp) {
                 break;
               }
@@ -2131,12 +2210,85 @@ namespace video {
     return 0;
   }
 
+#ifdef SUNSHINE_ENABLE_PYROWAVE
+  int encode_pyrowave(int64_t frame_nr, pyrowave_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp, std::optional<std::chrono::steady_clock::time_point> host_processing_timestamp, bool capture_placeholder, std::uint64_t capture_generation) {
+    auto *frame = session.converter ? session.converter->frame : nullptr;
+    if (!session.encoder || !frame || frame->format != AV_PIX_FMT_NV12) {
+      BOOST_LOG(error) << "PyroWave: encode is missing an NV12 frame"sv;
+      return -1;
+    }
+
+    pyrowave_cpu_buffer buffer {};
+    buffer.format = PYROWAVE_CPU_BUFFER_FORMAT_NV12;
+    buffer.width = frame->width;
+    buffer.height = frame->height;
+    buffer.data[0] = frame->data[0];
+    buffer.data[1] = frame->data[1];
+    buffer.row_stride_in_bytes[0] = frame->linesize[0];
+    buffer.row_stride_in_bytes[1] = frame->linesize[1];
+    buffer.plane_size_in_bytes[0] = (std::size_t) frame->linesize[0] * frame->height;
+    buffer.plane_size_in_bytes[1] = (std::size_t) frame->linesize[1] * (frame->height / 2);
+
+    pyrowave_rate_control rate_control {};
+    rate_control.maximum_bitstream_size = session.max_frame_bytes;
+    if (pyrowave_encoder_encode_cpu_synchronous(session.encoder.get(), &buffer, &rate_control) != PYROWAVE_SUCCESS) {
+      BOOST_LOG(error) << "PyroWave: encode failed"sv;
+      return -1;
+    }
+
+    // A boundary larger than the whole frame asks for a single packet; the
+    // framing below still carries any extra packets the codec emits.
+    const std::size_t packet_boundary = session.max_frame_bytes + (1024 * 1024);
+    std::size_t num_packets = 0;
+    if (pyrowave_encoder_compute_num_packets(session.encoder.get(), packet_boundary, &num_packets) != PYROWAVE_SUCCESS ||
+        num_packets == 0 || num_packets > pyrowave::max_packets_per_frame) {
+      BOOST_LOG(error) << "PyroWave: unusable packet count "sv << num_packets;
+      return -1;
+    }
+
+    session.bitstream.resize(packet_boundary);
+    session.packets.resize(num_packets);
+    if (pyrowave_encoder_packetize(session.encoder.get(), session.packets.data(), packet_boundary, &num_packets, session.bitstream.data(), session.bitstream.size()) != PYROWAVE_SUCCESS) {
+      BOOST_LOG(error) << "PyroWave: packetize failed"sv;
+      return -1;
+    }
+
+    std::vector<pyrowave::packet_ref_t> refs;
+    refs.reserve(num_packets);
+    for (std::size_t i = 0; i < num_packets && i < session.packets.size(); ++i) {
+      refs.push_back({session.packets[i].offset, session.packets[i].size});
+    }
+
+    auto framed = pyrowave::frame_packets(session.bitstream, refs);
+    if (!framed) {
+      BOOST_LOG(error) << "PyroWave: packetizer returned out-of-range packets"sv;
+      return -1;
+    }
+
+    // Intra-only codec: every frame is a valid recovery point.
+    auto packet = std::make_unique<packet_raw_generic>(std::move(*framed), frame_nr, true);
+    packet->channel_data = channel_data;
+    packet->capture_placeholder = capture_placeholder;
+    packet->capture_generation = capture_generation;
+    packet->frame_timestamp = frame_timestamp;
+    packet->host_processing_timestamp = host_processing_timestamp;
+    packets->raise(std::move(packet));
+
+    return 0;
+  }
+#endif
+
   int encode(int64_t frame_nr, encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp, std::optional<std::chrono::steady_clock::time_point> host_processing_timestamp, bool capture_placeholder = false, std::uint64_t capture_generation = 0) {
     if (auto avcodec_session = dynamic_cast<avcodec_encode_session_t *>(&session)) {
       return encode_avcodec(frame_nr, *avcodec_session, packets, channel_data, frame_timestamp, host_processing_timestamp, capture_placeholder, capture_generation);
     } else if (auto nvenc_session = dynamic_cast<nvenc_encode_session_t *>(&session)) {
       return encode_nvenc(frame_nr, *nvenc_session, packets, channel_data, frame_timestamp, host_processing_timestamp, capture_placeholder, capture_generation);
     }
+#ifdef SUNSHINE_ENABLE_PYROWAVE
+    else if (auto pyrowave_session = dynamic_cast<pyrowave_encode_session_t *>(&session)) {
+      return encode_pyrowave(frame_nr, *pyrowave_session, packets, channel_data, frame_timestamp, host_processing_timestamp, capture_placeholder, capture_generation);
+    }
+#endif
 
     return -1;
   }
@@ -2660,7 +2812,126 @@ namespace video {
     return *queue;
   }
 
+#ifdef SUNSHINE_ENABLE_PYROWAVE
+  namespace {
+    bool pyrowave_api_compatible() {
+      std::uint32_t major = 0;
+      std::uint32_t minor = 0;
+      std::uint32_t patch = 0;
+      pyrowave_get_api_version(&major, &minor, &patch);
+      // Pre-1.0 PyroWave treats every minor bump as an ABI break.
+      if (major != PYROWAVE_API_VERSION_MAJOR || minor != PYROWAVE_API_VERSION_MINOR) {
+        BOOST_LOG(error) << "PyroWave: runtime API "sv << major << '.' << minor << '.' << patch
+                         << " does not match the headers this build used ("sv
+                         << PYROWAVE_API_VERSION_MAJOR << '.' << PYROWAVE_API_VERSION_MINOR << ')';
+        return false;
+      }
+      return true;
+    }
+  }  // namespace
+#endif
+
+  bool pyrowave_available() {
+#ifdef SUNSHINE_ENABLE_PYROWAVE
+    static const bool available = []() {
+      if (!pyrowave_api_compatible()) {
+        return false;
+      }
+      pyrowave_device raw_device = nullptr;
+      if (pyrowave_create_default_device(&raw_device) != PYROWAVE_SUCCESS || !raw_device) {
+        BOOST_LOG(warning) << "PyroWave: no usable Vulkan 1.3 device; codec will not be advertised"sv;
+        return false;
+      }
+      pyrowave_device_destroy(raw_device);
+      BOOST_LOG(info) << "PyroWave: codec available"sv;
+      return true;
+    }();
+    return available;
+#else
+    return false;
+#endif
+  }
+
+#ifdef SUNSHINE_ENABLE_PYROWAVE
+  std::unique_ptr<encode_session_t> make_pyrowave_encode_session(const config_t &config, int width, int height, std::unique_ptr<platf::encode_device_t> encode_device) {
+    auto *capture_device = dynamic_cast<platf::avcodec_encode_device_t *>(encode_device.get());
+    if (!capture_device || capture_device->data) {
+      BOOST_LOG(error) << "PyroWave: needs a system-memory capture device"sv;
+      return nullptr;
+    }
+    if (config.dynamicRange || config.chromaSamplingType != 0) {
+      BOOST_LOG(error) << "PyroWave: only 8-bit 4:2:0 is supported"sv;
+      return nullptr;
+    }
+    if (config.width < 2 || config.height < 2 || config.width % 2 || config.height % 2) {
+      BOOST_LOG(error) << "PyroWave: needs positive even dimensions, got "sv << config.width << 'x' << config.height;
+      return nullptr;
+    }
+    if (!pyrowave_api_compatible()) {
+      return nullptr;
+    }
+
+    auto session = std::make_unique<pyrowave_encode_session_t>();
+
+    pyrowave_device raw_device = nullptr;
+    if (pyrowave_create_default_device(&raw_device) != PYROWAVE_SUCCESS || !raw_device) {
+      BOOST_LOG(error) << "PyroWave: device creation failed"sv;
+      return nullptr;
+    }
+    session->device.reset(raw_device);
+
+    pyrowave_encoder_create_info encoder_info {};
+    encoder_info.device = session->device.get();
+    encoder_info.width = config.width;
+    encoder_info.height = config.height;
+    encoder_info.chroma = PYROWAVE_CHROMA_SUBSAMPLING_420;
+
+    pyrowave_encoder raw_encoder = nullptr;
+    if (pyrowave_encoder_create(&encoder_info, &raw_encoder) != PYROWAVE_SUCCESS || !raw_encoder) {
+      BOOST_LOG(error) << "PyroWave: encoder creation failed"sv;
+      return nullptr;
+    }
+    session->encoder.reset(raw_encoder);
+
+    const auto colorspace = capture_device->colorspace;
+    avcodec_frame_t frame {av_frame_alloc()};
+    frame->format = AV_PIX_FMT_NV12;
+    frame->width = config.width;
+    frame->height = config.height;
+    frame->color_range = colorspace.full_range ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
+
+    auto converter = std::make_unique<avcodec_software_encode_device_t>();
+    if (converter->init(width, height, frame.get(), AV_PIX_FMT_NV12, false)) {
+      BOOST_LOG(error) << "PyroWave: BGRA to NV12 conversion init failed"sv;
+      return nullptr;
+    }
+    converter->colorspace = colorspace;
+    if (converter->set_frame(frame.release(), nullptr)) {
+      return nullptr;
+    }
+    converter->apply_colorspace();
+    session->converter = std::move(converter);
+
+    if (config.bitrate < pyrowave::min_bitrate_kbps) {
+      BOOST_LOG(warning) << "PyroWave: raising bitrate from "sv << config.bitrate << " kbps to "sv
+                         << pyrowave::fallback_bitrate_kbps << " kbps; the codec needs at least "sv
+                         << pyrowave::min_bitrate_kbps << " kbps"sv;
+    }
+    session->max_frame_bytes = pyrowave::max_frame_bytes(config.bitrate, config.framerate);
+
+    BOOST_LOG(info) << "PyroWave: encoder "sv << config.width << 'x' << config.height << " @"sv << std::max(config.framerate, 1)
+                    << " fps, "sv << pyrowave::effective_bitrate_kbps(config.bitrate) << " kbps ("sv
+                    << session->max_frame_bytes << " bytes/frame)"sv;
+    return session;
+  }
+#endif
+
   std::unique_ptr<encode_session_t> make_encode_session(platf::display_t *disp, const encoder_t &encoder, const config_t &config, int width, int height, std::unique_ptr<platf::encode_device_t> encode_device) {
+#ifdef SUNSHINE_ENABLE_PYROWAVE
+    if (config.videoFormat == pyrowave_video_format) {
+      return make_pyrowave_encode_session(config, width, height, std::move(encode_device));
+    }
+#endif
     if (dynamic_cast<platf::avcodec_encode_device_t *>(encode_device.get())) {
       auto avcodec_encode_device = boost::dynamic_pointer_cast<platf::avcodec_encode_device_t>(std::move(encode_device));
       return make_avcodec_encode_session(disp, encoder, config, width, height, std::move(avcodec_encode_device));
@@ -3099,6 +3370,23 @@ namespace video {
 
     auto colorspace = colorspace_from_client_config(config, disp.is_hdr());
 
+    if (config.videoFormat == pyrowave_video_format) {
+#ifdef SUNSHINE_ENABLE_PYROWAVE
+      // PyroWave does its own encode on a Vulkan device from system memory,
+      // independent of the hardware encoder chosen for the classic codecs.
+      BOOST_LOG(info) << "Creating encoder "sv << logging::bracket("pyrowave"s);
+      BOOST_LOG(info) << "Color range: "sv << (colorspace.full_range ? "JPEG"sv : "MPEG"sv);
+      result = disp.make_avcodec_encode_device(platf::pix_fmt_e::nv12);
+      if (result) {
+        result->colorspace = colorspace;
+      }
+      return result;
+#else
+      BOOST_LOG(error) << "PyroWave was requested, but this build does not include it"sv;
+      return result;
+#endif
+    }
+
     platf::pix_fmt_e pix_fmt;
     if (config.chromaSamplingType == 1) {
       // YUV 4:4:4
@@ -3332,7 +3620,7 @@ namespace video {
       }
 #endif
       // Refresh display names since a display removal might have caused the reinitialization
-      refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
+      refresh_displays(capture_dev_type_for(encoder, synced_session_ctxs.front()->config), display_names, display_p);
 
       if (!ensure_virtual_display_ready(display_names, display_p)) {
         std::this_thread::sleep_for(50ms);
@@ -3349,7 +3637,7 @@ namespace video {
       }
 
       // reset_display() will sleep between retries
-      reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], synced_session_ctxs.front()->config);
+      reset_display(disp, capture_dev_type_for(encoder, synced_session_ctxs.front()->config), display_names[display_p], synced_session_ctxs.front()->config);
       if (disp) {
         break;
       }

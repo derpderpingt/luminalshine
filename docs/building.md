@@ -244,6 +244,28 @@ If you cannot use the helper script, the underlying steps are:
 8. Configure Sunshine with `-DSUNSHINE_ENABLE_WEBRTC=ON`. If CMake still fails to find libwebrtc, pass
    `WEBRTC_INCLUDE_DIR` and `WEBRTC_LIBRARY` explicitly.
 
+##### PyroWave (experimental, off by default)
+[PyroWave](https://github.com/Themaister/pyrowave) is an intra-only wavelet codec that encodes in Vulkan compute
+shaders in well under a millisecond. It targets wired LAN streaming at 200+ Mbps where latency matters more than
+bandwidth. Only PyroWave-aware clients can use it (e.g. [zevro-ai/moonlight](https://github.com/zevro-ai/moonlight),
+built on [zevro-ai/moonlight-common-c](https://github.com/zevro-ai/moonlight-common-c)); stock Moonlight ignores it.
+
+1. Build and install libpyrowave-shared from the MSYS2 UCRT64 shell (needs the Vulkan headers:
+   `pacman -S mingw-w64-ucrt-x86_64-vulkan-headers`):
+   ```bash
+   git clone https://github.com/Themaister/pyrowave && cd pyrowave
+   bash checkout_granite.sh
+   cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PWD/output"
+   cmake --build build && cmake --install build
+   ```
+2. Configure LuminalShine with `-DSUNSHINE_ENABLE_PYROWAVE=ON -DPYROWAVE_ROOT=<pyrowave>/output`. The runtime
+   `libpyrowave-shared-0.dll` is copied next to the executable and into the installer.
+
+Limits of this integration: 8-bit 4:2:0 only (the client must have HDR and YUV 4:4:4 off), frames are captured to
+system memory and converted to NV12 on the CPU before PyroWave uploads them, and the client's bitrate slider is
+used as the per-frame size cap (requests under 100 Mbps are raised to 150 Mbps). The codec is only advertised
+when the host can create a Vulkan 1.3 device and the loaded DLL matches the headers' API version.
+
 To create a WiX installer, you also need to install [.NET](https://dotnet.microsoft.com/download).
 
 For ARM64: To build frontend, you also need to install [Node.JS](https://nodejs.org/en/download)
