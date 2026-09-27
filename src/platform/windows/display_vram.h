@@ -5,6 +5,7 @@
 #pragma once
 
 // standard includes
+#include <atomic>
 #include <memory>
 
 // local includes

@@ -49,6 +49,7 @@ namespace config {
     /// GPU can encode 4:4:4; on GPUs without that capability nothing is
     /// advertised regardless of this setting.
     bool yuv444_streaming;
+    bool pyrowave;
 
     int min_threads;  // Minimum number of threads/slices for CPU encoding
 

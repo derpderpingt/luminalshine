@@ -31,7 +31,7 @@ unset(_luminalshine_webrtc_default)
 # PyroWave (https://github.com/Themaister/pyrowave): an intra-only Vulkan-compute
 # wavelet codec for very-high-bitrate LAN streaming. Experimental and opt-in:
 # it needs libpyrowave-shared plus a client built against the PyroWave-aware
-# moonlight-common-c. See docs/pyrowave.md.
+# moonlight-common-c. See docs/building.md.
 option(SUNSHINE_ENABLE_PYROWAVE "Enable the experimental PyroWave codec (requires libpyrowave-shared)." OFF)
 set(PYROWAVE_ROOT "" CACHE PATH "Install prefix of libpyrowave-shared (contains include/ and lib/ or bin/).")
 

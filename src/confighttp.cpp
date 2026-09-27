@@ -2699,6 +2699,8 @@ namespace confighttp {
       output_tree["encoder_probe"] = std::move(node);
     } catch (...) {}
 
+    output_tree["pyrowave_available"] = video::pyrowave_available();
+
     // Active session count: useful nice-to-have for the About page so a
     // support reader can immediately tell whether the host is currently
     // streaming or idle.

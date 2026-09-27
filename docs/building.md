@@ -260,8 +260,9 @@ built on [zevro-ai/moonlight-common-c](https://github.com/zevro-ai/moonlight-com
    ```
 2. Configure LuminalShine with `-DSUNSHINE_ENABLE_PYROWAVE=ON -DPYROWAVE_ROOT=<pyrowave>/output`. The runtime
    `libpyrowave-shared-0.dll` is copied next to the executable and into the installer.
+3. Enable the `pyrowave` setting in Capture settings (disabled by default). Only do this for compatible clients.
 
-Limits of this integration: 8-bit 4:2:0 only (the client must have HDR and YUV 4:4:4 off), frames are captured to
+Limits of this integration: 8-bit 4:2:0 SDR only (the client must have HDR and YUV 4:4:4 off), frames are captured to
 system memory and converted to NV12 on the CPU before PyroWave uploads them, and the client's bitrate slider is
 used as the per-frame size cap (requests under 100 Mbps are raised to 150 Mbps). The codec is only advertised
 when the host can create a Vulkan 1.3 device and the loaded DLL matches the headers' API version.

@@ -4,6 +4,7 @@
  */
 // standard includes
 #include <cmath>
+#include <vector>
 
 // platform includes
 #include <winsock2.h>

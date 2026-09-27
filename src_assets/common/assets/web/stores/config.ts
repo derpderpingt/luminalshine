@@ -57,6 +57,7 @@ export interface MetaInfo {
     av1_yuv444?: boolean;
     ref_frames_invalidation?: boolean;
   };
+  pyrowave_available?: boolean;
   host_name?: string;
   cpu_model?: string;
   total_physical_memory?: number;
@@ -269,6 +270,7 @@ const defaultGroups = [
       // `bool yuv444_streaming {true}`; the Capture tab locks the switch off
       // when the encoder probe reports no 4:4:4-capable codec.
       yuv444_streaming: true,
+      pyrowave: false,
       capture: '',
       encoder: '',
       // Per-session telemetry to the LuminalShineSessionMonitor

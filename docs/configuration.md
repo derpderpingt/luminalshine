@@ -2685,6 +2685,33 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### pyrowave
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Allow compatible clients to negotiate experimental PyroWave
+            streaming. This requires a build configured with
+            <code>SUNSHINE_ENABLE_PYROWAVE=ON</code> and an available Vulkan
+            1.3 device. The backend supports 8-bit 4:2:0 SDR only and can use
+            substantially more bandwidth than H.264, HEVC, or AV1.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            pyrowave = enabled
+            @endcode</td>
+    </tr>
+</table>
+
 ### capture
 
 <table>

@@ -2081,7 +2081,7 @@ namespace nvhttp {
       }
     }
     // Experimental PyroWave codec (PyroWave-aware moonlight-common-c extension bit).
-    if (video::pyrowave_available()) {
+    if (config::video.pyrowave && video::pyrowave_available()) {
       codec_mode_flags |= video::scm_pyrowave;
     }
     tree.put("root.ServerCodecModeSupport", codec_mode_flags);

@@ -745,6 +745,7 @@ namespace config {
     0,  // av1_mode
     false,  // prefer_10bit_sdr
     true,  // yuv444_streaming
+    false,  // pyrowave
 
     2,  // min_threads
     {
@@ -1489,6 +1490,12 @@ namespace config {
     int_between_f(vars, "av1_mode", video.av1_mode, {0, 3});
     bool_f(vars, "prefer_10bit_sdr", video.prefer_10bit_sdr);
     bool_f(vars, "yuv444_streaming", video.yuv444_streaming);
+    bool_f(vars, "pyrowave", video.pyrowave);
+#if !defined(SUNSHINE_ENABLE_PYROWAVE)
+    if (video.pyrowave) {
+      BOOST_LOG(warning) << "pyrowave is enabled in configuration, but this build has no PyroWave backend";
+    }
+#endif
     int_f(vars, "min_threads", video.min_threads);
     string_f(vars, "sw_preset", video.sw.sw_preset);
     if (!video.sw.sw_preset.empty()) {
@@ -2164,6 +2171,7 @@ namespace config {
         "av1_mode",
         "prefer_10bit_sdr",
         "yuv444_streaming",
+        "pyrowave",
         "capture",
         "encoder",
 

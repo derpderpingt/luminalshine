@@ -7,13 +7,17 @@
 #include <atomic>
 #include <bitset>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <list>
 #include <mutex>
 #include <optional>
 #include <sstream>
 #include <thread>
+#include <vector>
 
 // lib includes
 #include <boost/algorithm/string/predicate.hpp>
@@ -2279,17 +2283,16 @@ namespace video {
 #endif
 
   int encode(int64_t frame_nr, encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp, std::optional<std::chrono::steady_clock::time_point> host_processing_timestamp, bool capture_placeholder = false, std::uint64_t capture_generation = 0) {
+#if defined(SUNSHINE_ENABLE_PYROWAVE)
+    if (auto pyrowave_session = dynamic_cast<pyrowave_encode_session_t *>(&session)) {
+      return encode_pyrowave(frame_nr, *pyrowave_session, packets, channel_data, frame_timestamp, host_processing_timestamp, capture_placeholder, capture_generation);
+    }
+#endif
     if (auto avcodec_session = dynamic_cast<avcodec_encode_session_t *>(&session)) {
       return encode_avcodec(frame_nr, *avcodec_session, packets, channel_data, frame_timestamp, host_processing_timestamp, capture_placeholder, capture_generation);
     } else if (auto nvenc_session = dynamic_cast<nvenc_encode_session_t *>(&session)) {
       return encode_nvenc(frame_nr, *nvenc_session, packets, channel_data, frame_timestamp, host_processing_timestamp, capture_placeholder, capture_generation);
     }
-#ifdef SUNSHINE_ENABLE_PYROWAVE
-    else if (auto pyrowave_session = dynamic_cast<pyrowave_encode_session_t *>(&session)) {
-      return encode_pyrowave(frame_nr, *pyrowave_session, packets, channel_data, frame_timestamp, host_processing_timestamp, capture_placeholder, capture_generation);
-    }
-#endif
-
     return -1;
   }
 
@@ -4014,6 +4017,10 @@ namespace video {
     config_t config,
     void *channel_data
   ) {
+    if (config.videoFormat == pyrowave_video_format && channel_data == nullptr) {
+      BOOST_LOG(error) << "PyroWave is only supported by the RTSP streaming path";
+      return;
+    }
 #ifdef _WIN32
     const bool isolated_worker_child = platf::video_worker::is_child_process();
     if (platf::video_worker::capture(mail, config, channel_data)) {
