@@ -1025,11 +1025,11 @@ namespace rtsp_stream {
       ss << "a=rtpmap:98 AV1/90000"sv << std::endl;
     }
 
-#if defined(SUNSHINE_ENABLE_PYROWAVE)
-    if (config::video.pyrowave) {
+    // Experimental PyroWave codec. Only PyroWave-aware clients look for this
+    // (alongside SCM_PYROWAVE in serverinfo); stock Moonlight ignores it.
+    if (config::video.pyrowave && video::pyrowave_available()) {
       ss << "a=rtpmap:99 PYROWAVE/90000"sv << std::endl;
     }
-#endif
 
     if (!session.surround_params.empty()) {
       // If we have our own surround parameters, advertise them twice first
@@ -1235,12 +1235,12 @@ namespace rtsp_stream {
       config.monitor.chromaSamplingType = (int) util::from_view(args.at("x-ss-video[0].chromaSamplingType"sv));
       config.monitor.enableIntraRefresh = (int) util::from_view(args.at("x-ss-video[0].intraRefresh"sv));
 
-      if (config.monitor.videoFormat < 0 || config.monitor.videoFormat > video::VIDEO_FORMAT_PYROWAVE) {
+      if (config.monitor.videoFormat < 0 || config.monitor.videoFormat > video::pyrowave_video_format) {
         BOOST_LOG(warning) << "Rejecting unsupported video format "sv << config.monitor.videoFormat;
         respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
         return;
       }
-      if (config.monitor.videoFormat == video::VIDEO_FORMAT_PYROWAVE) {
+      if (config.monitor.videoFormat == video::pyrowave_video_format) {
 #if defined(SUNSHINE_ENABLE_PYROWAVE)
         if (!config::video.pyrowave) {
           BOOST_LOG(warning) << "Client requested PyroWave while pyrowave is disabled";
@@ -1266,7 +1266,7 @@ namespace rtsp_stream {
         BOOST_LOG(warning) << "Client requested YUV 4:4:4 but yuv444_streaming is disabled; downgrading to YUV 4:2:0"sv;
         config.monitor.chromaSamplingType = 0;
       }
-      if (config.monitor.videoFormat == video::VIDEO_FORMAT_PYROWAVE &&
+      if (config.monitor.videoFormat == video::pyrowave_video_format &&
           config.monitor.chromaSamplingType != 1 &&
           ((config.monitor.width & 1) != 0 || (config.monitor.height & 1) != 0)) {
         BOOST_LOG(warning) << "Rejecting odd-sized PyroWave 4:2:0 request";
@@ -1378,23 +1378,30 @@ namespace rtsp_stream {
     if (configuredBitrateKbps) {
       BOOST_LOG(debug) << "Client configured bitrate is "sv << configuredBitrateKbps << " Kbps"sv;
 
-      // If the FEC percentage isn't too high, adjust the configured bitrate to ensure video
-      // traffic doesn't exceed the user's selected bitrate when the FEC shards are included.
-      if (config::stream.fec_percentage <= 80) {
-        configuredBitrateKbps /= 100.f / (100 - config::stream.fec_percentage);
+      if (config.monitor.videoFormat == video::pyrowave_video_format) {
+        // PyroWave's per-frame size cap is its only quality control. Use the
+        // slider value as-is instead of reserving part of it for FEC and audio.
+        config.monitor.bitrate = (int) configuredBitrateKbps;
+        BOOST_LOG(info) << "PyroWave bitrate from client: "sv << configuredBitrateKbps << " Kbps"sv;
+      } else {
+        // If the FEC percentage isn't too high, adjust the configured bitrate to ensure video
+        // traffic doesn't exceed the user's selected bitrate when the FEC shards are included.
+        if (config::stream.fec_percentage <= 80) {
+          configuredBitrateKbps /= 100.f / (100 - config::stream.fec_percentage);
+        }
+
+        // Adjust the bitrate to account for audio traffic bandwidth usage (capped at 20% reduction).
+        // The bitrate per channel is 256 Kbps for high quality mode and 96 Kbps for normal quality.
+        auto audioBitrateAdjustment = (config.audio.flags[audio::config_t::HIGH_QUALITY] ? 256 : 96) * config.audio.channels;
+        configuredBitrateKbps -= std::min((std::int64_t) audioBitrateAdjustment, configuredBitrateKbps / 5);
+
+        // Reduce it by another 500Kbps to account for A/V packet overhead and control data
+        // traffic (capped at 10% reduction).
+        configuredBitrateKbps -= std::min((std::int64_t) 500, configuredBitrateKbps / 10);
+
+        BOOST_LOG(debug) << "Final adjusted video encoding bitrate is "sv << configuredBitrateKbps << " Kbps"sv;
+        config.monitor.bitrate = (int) configuredBitrateKbps;
       }
-
-      // Adjust the bitrate to account for audio traffic bandwidth usage (capped at 20% reduction).
-      // The bitrate per channel is 256 Kbps for high quality mode and 96 Kbps for normal quality.
-      auto audioBitrateAdjustment = (config.audio.flags[audio::config_t::HIGH_QUALITY] ? 256 : 96) * config.audio.channels;
-      configuredBitrateKbps -= std::min((std::int64_t) audioBitrateAdjustment, configuredBitrateKbps / 5);
-
-      // Reduce it by another 500Kbps to account for A/V packet overhead and control data
-      // traffic (capped at 10% reduction).
-      configuredBitrateKbps -= std::min((std::int64_t) 500, configuredBitrateKbps / 10);
-
-      BOOST_LOG(debug) << "Final adjusted video encoding bitrate is "sv << configuredBitrateKbps << " Kbps"sv;
-      config.monitor.bitrate = (int) configuredBitrateKbps;
     }
 
     if (config.monitor.videoFormat == 1 && video::active_hevc_mode == 1) {
@@ -1409,6 +1416,30 @@ namespace rtsp_stream {
 
       respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
       return;
+    }
+
+    if (config.monitor.videoFormat == video::pyrowave_video_format) {
+      if (!config::video.pyrowave || !video::pyrowave_available()) {
+        BOOST_LOG(warning) << "PyroWave is unavailable, yet the client requested PyroWave"sv;
+
+        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return;
+      }
+      if (config.monitor.dynamicRange || config.monitor.chromaSamplingType) {
+        BOOST_LOG(warning) << "PyroWave supports 8-bit 4:2:0 only; turn HDR and YUV 4:4:4 off in the client"sv;
+
+        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return;
+      }
+      if (config.monitor.width < 2 || config.monitor.height < 2 ||
+          (config.monitor.width & 1) != 0 || (config.monitor.height & 1) != 0) {
+        BOOST_LOG(warning) << "Rejecting invalid PyroWave dimensions "sv
+                           << config.monitor.width << 'x' << config.monitor.height;
+
+        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return;
+      }
+      BOOST_LOG(info) << "Client requested PyroWave"sv;
     }
 
     // Check that any required encryption is enabled

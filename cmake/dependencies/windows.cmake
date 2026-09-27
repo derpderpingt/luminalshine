@@ -37,7 +37,3 @@ endif()
 if(SUNSHINE_ENABLE_WEBRTC)
     include("${CMAKE_MODULE_PATH}/dependencies/webrtc.cmake")
 endif()
-
-if(SUNSHINE_ENABLE_PYROWAVE)
-    include("${CMAKE_MODULE_PATH}/dependencies/pyrowave.cmake")
-endif()

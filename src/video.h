@@ -34,7 +34,7 @@ namespace video {
        SDR encoding colorspace (encoderCscMode >> 1) : 0 - BT.601, 1 - BT.709, 2 - BT.2020 */
     int encoderCscMode;
 
-    int videoFormat;  // 0 - H.264, 1 - HEVC, 2 - AV1, 3 - PyroWave
+    int videoFormat;  // 0 - H.264, 1 - HEVC, 2 - AV1, 3 - PyroWave (experimental, see video::pyrowave_video_format)
 
     /* Encoding color depth (bit depth): 0 - 8-bit, 1 - 10-bit
        HDR encoding activates when color depth is higher than 8-bit and the display which is being captured is operating in HDR mode */
@@ -47,8 +47,6 @@ namespace video {
 
     int enableIntraRefresh;  // 0 - disabled, 1 - enabled
   };
-
-  inline constexpr int VIDEO_FORMAT_PYROWAVE = 3;
 
   platf::mem_type_e map_base_dev_type(AVHWDeviceType type);
   platf::pix_fmt_e map_pix_fmt(AVPixelFormat fmt);
@@ -188,6 +186,11 @@ namespace video {
 
     const codec_t &codec_from_config(const config_t &config) const {
       switch (config.videoFormat) {
+        case 3:
+          // PyroWave is not an FFmpeg/NVENC/AMF codec; the encode path branches
+          // on videoFormat before ever consulting this descriptor. H.264 is
+          // returned only so logging and capability lookups stay well-defined.
+          return h264;
         default:
           BOOST_LOG(error) << "Unknown video format " << config.videoFormat << ", falling back to H.264";
           // fallthrough
@@ -435,6 +438,22 @@ namespace video {
    * @warning This is only safe to call when there is no client actively streaming.
    */
   int probe_encoders();
+
+  /// config_t::videoFormat value for the experimental PyroWave codec.
+  constexpr int pyrowave_video_format = 3;
+
+  /// ServerCodecModeSupport bit PyroWave-aware clients look for (SCM_PYROWAVE
+  /// in the PyroWave fork of moonlight-common-c; unused by upstream).
+  constexpr std::uint32_t scm_pyrowave = 0x00800000;
+
+  /**
+   * @brief Whether PyroWave streams can be served.
+   *
+   * False unless built with SUNSHINE_ENABLE_PYROWAVE. Otherwise probes once
+   * (and caches) that the linked libpyrowave matches the compiled API version
+   * and that a Vulkan 1.3 device PyroWave accepts can be created.
+   */
+  bool pyrowave_available();
 
   // Several NTSC standard refresh rates are hardcoded here, because their
   // true rate requires a denominator of 1001. ffmpeg's av_d2q() would assume it could

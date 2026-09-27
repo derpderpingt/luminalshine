@@ -225,12 +225,6 @@ namespace platf::dxgi {
           BOOST_LOG(error) << "Failed to create NT shared texture handle [0x"sv << util::hex(status).to_string_view() << ']';
           return capture_e::error;
         }
-
-#if defined(SUNSHINE_ENABLE_PYROWAVE)
-        if (initialize_pyrowave_sync(d3d_img.get())) {
-          return capture_e::error;
-        }
-#endif
       }
 
       // Set the format and other properties

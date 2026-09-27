@@ -28,10 +28,12 @@ endif()
 option(SUNSHINE_ENABLE_WEBRTC "Enable WebRTC streaming support (Windows only)." ${_luminalshine_webrtc_default})
 unset(_luminalshine_webrtc_default)
 
-option(SUNSHINE_ENABLE_PYROWAVE "Enable experimental PyroWave streaming support (Windows only)." OFF)
-if(SUNSHINE_ENABLE_PYROWAVE AND NOT WIN32)
-    message(FATAL_ERROR "PyroWave streaming currently requires the Windows D3D11 capture backend.")
-endif()
+# PyroWave (https://github.com/Themaister/pyrowave): an intra-only Vulkan-compute
+# wavelet codec for very-high-bitrate LAN streaming. Experimental and opt-in:
+# it needs libpyrowave-shared plus a client built against the PyroWave-aware
+# moonlight-common-c. See docs/building.md.
+option(SUNSHINE_ENABLE_PYROWAVE "Enable the experimental PyroWave codec (requires libpyrowave-shared)." OFF)
+set(PYROWAVE_ROOT "" CACHE PATH "Install prefix of libpyrowave-shared (contains include/ and lib/ or bin/).")
 
 option(SUNSHINE_SYSTEM_WAYLAND_PROTOCOLS "Use system installation of wayland-protocols rather than the submodule." OFF)
 

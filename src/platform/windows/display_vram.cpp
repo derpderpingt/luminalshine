@@ -10,9 +10,6 @@
 #include <winsock2.h>
 #include <d3dcompiler.h>
 #include <DirectXMath.h>
-#if defined(SUNSHINE_ENABLE_PYROWAVE)
-  #include <d3d11_4.h>
-#endif
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -1904,14 +1901,6 @@ namespace platf::dxgi {
       CloseHandle(img->encoder_texture_handle);
       img->encoder_texture_handle = nullptr;
     }
-#if defined(SUNSHINE_ENABLE_PYROWAVE)
-    img->pyrowave_fence.Reset();
-    if (img->pyrowave_fence_handle) {
-      CloseHandle(img->pyrowave_fence_handle);
-      img->pyrowave_fence_handle = nullptr;
-    }
-    img->pyrowave_fence_value.store(0, std::memory_order_relaxed);
-#endif
 
     // Initialize format-dependent fields
     img->pixel_pitch = get_pixel_pitch();
@@ -1930,19 +1919,7 @@ namespace platf::dxgi {
     t.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
     t.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
 
-    D3D11_SUBRESOURCE_DATA initial_data {};
-    const D3D11_SUBRESOURCE_DATA *initial_data_ptr = nullptr;
-#if defined(SUNSHINE_ENABLE_PYROWAVE)
-    std::vector<std::uint8_t> dummy_pixels;
-    if (dummy && pyrowave_enabled) {
-      dummy_pixels.resize(static_cast<std::size_t>(img->row_pitch) * img->height);
-      initial_data.pSysMem = dummy_pixels.data();
-      initial_data.SysMemPitch = static_cast<UINT>(img->row_pitch);
-      initial_data_ptr = &initial_data;
-    }
-#endif
-
-    auto status = device->CreateTexture2D(&t, initial_data_ptr, &img->capture_texture);
+    auto status = device->CreateTexture2D(&t, nullptr, &img->capture_texture);
     if (FAILED(status)) {
       const HRESULT removed = device->GetDeviceRemovedReason();
       BOOST_LOG(error) << "Failed to create img buf texture " << t.Width << 'x' << t.Height
@@ -2009,81 +1986,10 @@ namespace platf::dxgi {
       return -1;
     }
 
-#if defined(SUNSHINE_ENABLE_PYROWAVE)
-    if (initialize_pyrowave_sync(img)) {
-      return -1;
-    }
-#endif
-
     img->data = (std::uint8_t *) img->capture_texture.get();
 
     return 0;
   }
-
-#if defined(SUNSHINE_ENABLE_PYROWAVE)
-  int display_vram_t::initialize_pyrowave_sync(img_d3d_t *img) {
-    if (!pyrowave_enabled) {
-      return 0;
-    }
-
-    img->pyrowave_fence.Reset();
-    if (img->pyrowave_fence_handle) {
-      CloseHandle(img->pyrowave_fence_handle);
-      img->pyrowave_fence_handle = nullptr;
-    }
-    img->pyrowave_fence_value.store(0, std::memory_order_relaxed);
-
-    Microsoft::WRL::ComPtr<ID3D11Device5> device5;
-    HRESULT status = device->QueryInterface(IID_PPV_ARGS(&device5));
-    if (FAILED(status)) {
-      BOOST_LOG(error) << "PyroWave requires ID3D11Device5 [0x"sv << util::hex(status).to_string_view() << ']';
-      return -1;
-    }
-
-    status = device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&img->pyrowave_fence));
-    if (FAILED(status)) {
-      BOOST_LOG(error) << "Failed to create PyroWave D3D11 fence [0x"sv << util::hex(status).to_string_view() << ']';
-      return -1;
-    }
-
-    status = img->pyrowave_fence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &img->pyrowave_fence_handle);
-    if (FAILED(status)) {
-      BOOST_LOG(error) << "Failed to create PyroWave fence handle [0x"sv << util::hex(status).to_string_view() << ']';
-      return -1;
-    }
-
-    img->pyrowave_resource_generation.fetch_add(1, std::memory_order_relaxed);
-    return 0;
-  }
-
-  int display_vram_t::capture_complete(platf::img_t *img_base) {
-    if (!pyrowave_enabled) {
-      return 0;
-    }
-
-    auto *img = dynamic_cast<img_d3d_t *>(img_base);
-    if (!img || !img->pyrowave_fence) {
-      BOOST_LOG(error) << "PyroWave capture produced an image without a shared fence";
-      return -1;
-    }
-
-    Microsoft::WRL::ComPtr<ID3D11DeviceContext4> context4;
-    const HRESULT query_status = device_ctx->QueryInterface(IID_PPV_ARGS(&context4));
-    if (FAILED(query_status)) {
-      BOOST_LOG(error) << "PyroWave requires ID3D11DeviceContext4 [0x"sv << util::hex(query_status).to_string_view() << ']';
-      return -1;
-    }
-
-    const auto value = img->pyrowave_fence_value.fetch_add(1, std::memory_order_relaxed) + 1;
-    const HRESULT status = context4->Signal(img->pyrowave_fence.Get(), value);
-    if (FAILED(status)) {
-      BOOST_LOG(error) << "Failed to signal PyroWave D3D11 fence [0x"sv << util::hex(status).to_string_view() << ']';
-      return -1;
-    }
-
-    return 0;
-  }
-#endif
 
   // This cannot use ID3D11DeviceContext because it can be called concurrently by the encoding thread
   /**
@@ -2094,11 +2000,6 @@ namespace platf::dxgi {
   }
 
   std::vector<DXGI_FORMAT> display_vram_t::get_supported_capture_formats() {
-#if defined(SUNSHINE_ENABLE_PYROWAVE)
-    if (pyrowave_enabled) {
-      return {DXGI_FORMAT_B8G8R8A8_UNORM};
-    }
-#endif
     return {
       // scRGB FP16 is the ideal format for Wide Color Gamut and Advanced Color
       // displays (both SDR and HDR). This format uses linear gamma, so we will

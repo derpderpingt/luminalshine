@@ -2080,11 +2080,10 @@ namespace nvhttp {
         codec_mode_flags |= SCM_AV1_HIGH10_444;
       }
     }
-#if defined(SUNSHINE_ENABLE_PYROWAVE)
-    if (config::video.pyrowave) {
-      codec_mode_flags |= 0x00800000U;
+    // Experimental PyroWave codec (PyroWave-aware moonlight-common-c extension bit).
+    if (config::video.pyrowave && video::pyrowave_available()) {
+      codec_mode_flags |= video::scm_pyrowave;
     }
-#endif
     tree.put("root.ServerCodecModeSupport", codec_mode_flags);
 
     auto current_appid = proc::proc.running();

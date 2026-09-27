@@ -14,10 +14,6 @@
 // platform includes
 #include <d3d11.h>
 #include <dxgi.h>
-#if defined(SUNSHINE_ENABLE_PYROWAVE)
-  #include <d3d11_4.h>
-  #include <wrl/client.h>
-#endif
 
 namespace platf::dxgi {
 
@@ -32,12 +28,6 @@ namespace platf::dxgi {
     render_target_t capture_rt;  ///< Render target bound when copying / compositing.
     keyed_mutex_t capture_mutex;  ///< Keyed mutex for cross-process synchronization.
     HANDLE encoder_texture_handle = {};  ///< Duplicated shared handle opened by encoder side.
-#if defined(SUNSHINE_ENABLE_PYROWAVE)
-    Microsoft::WRL::ComPtr<ID3D11Fence> pyrowave_fence;
-    HANDLE pyrowave_fence_handle = {};
-    std::atomic<std::uint64_t> pyrowave_fence_value {};
-    std::atomic<std::uint64_t> pyrowave_resource_generation {};
-#endif
     bool dummy = false;  ///< True if placeholder prior to first successful frame.
     bool blank = true;  ///< True if contains no desktop or cursor content.
     uint32_t id = 0;  ///< Monotonically increasing identifier.
@@ -47,11 +37,6 @@ namespace platf::dxgi {
       if (encoder_texture_handle) {
         CloseHandle(encoder_texture_handle);
       }
-#if defined(SUNSHINE_ENABLE_PYROWAVE)
-      if (pyrowave_fence_handle) {
-        CloseHandle(pyrowave_fence_handle);
-      }
-#endif
     }
   };
 

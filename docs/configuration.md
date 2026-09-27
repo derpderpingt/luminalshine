@@ -2693,9 +2693,9 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td colspan="2">
             Allow compatible clients to negotiate experimental PyroWave
             streaming. This requires a build configured with
-            <code>SUNSHINE_ENABLE_PYROWAVE=ON</code>. The initial Windows
-            backend supports SDR only and can use substantially more bandwidth
-            than H.264, HEVC, or AV1.
+            <code>SUNSHINE_ENABLE_PYROWAVE=ON</code> and an available Vulkan
+            1.3 device. The backend supports 8-bit 4:2:0 SDR only and can use
+            substantially more bandwidth than H.264, HEVC, or AV1.
         </td>
     </tr>
     <tr>
